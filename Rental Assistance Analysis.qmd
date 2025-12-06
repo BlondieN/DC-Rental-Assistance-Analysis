@@ -1,0 +1,1452 @@
+---
+title: "Career MAP Program: Draft Analysis Report"
+author: "Blondie Beatrice Ndebele"
+date: "November 2, 2025"
+format:
+  pdf: default
+---
+
+# 
+
+```{r}
+#libraries
+library(tidyverse)
+library(readxl)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(car)
+library(janitor)
+library(caret)
+library(glmnet)
+library(tigris)
+library(sf)
+library(httr)
+library(jsonlite)
+library(xgboost)
+library(Matrix)
+library(randomForest)
+library(purrr)
+library(cluster)
+library(factoextra)
+```
+
+## Data Loading and Cleaning
+
+```{r}
+# Load all sheets
+df <- "Rents & Relocations_AU.xlsx"
+sheets <- excel_sheets(df)
+sheets_short <- c("old", "new", "curr")
+
+
+rent <- map(sheets, function(sh) read_excel(df, sheet = sh)) |> 
+  set_names(nm = sheets_short)
+```
+
+```{r}
+#View all sheets
+head(rent)
+```
+
+## Original Unit Rent
+
+**Variables of interest: Response ID, Original Unit Rent and Original Zip code**
+
+```{r}
+# Access first sheet
+old_rents <- rent[['old']]
+head(old_rents)
+
+#Check Structure 
+glimpse(old_rents)
+```
+
+```{r}
+cat("Missing values present:", any(is.na(old_rents)), "\n")
+```
+
+## Original Unit Rent Cleaning and Summary
+
+```{r}
+#change names to snake case 
+old_rents <- clean_names(old_rents)
+
+# Check new names
+colnames(old_rents)
+```
+
+```{r}
+#Extracting only 5 digits of the zipcode 
+old_rents <- old_rents |> 
+  mutate(original_zip_code = str_extract(old_rents$original_zip_code, 
+                                         "\\d{5}$"))
+
+head(old_rents)
+```
+
+```{r}
+# View clean summary of the old rent data
+skim(old_rents)
+```
+
+```{r}
+#Selecting variables of interest
+old_rents<- old_rents |>
+  select(response_id, original_unit_rent, original_zip_code) |>
+  filter(!is.na(original_zip_code)) |> 
+  mutate(original_unit_rent = as.numeric(original_unit_rent)) # Convert to numeric
+head(old_rents)
+```
+
+```{r}
+# Descriptive Statistics 
+old_rents |>
+  summarize(
+    mean = mean(original_unit_rent, na.rm = TRUE),
+    median = median(original_unit_rent, na.rm = TRUE),
+    min = min(original_unit_rent, na.rm = TRUE),
+    max = max(original_unit_rent, na.rm = TRUE),
+    sd = sd(original_unit_rent, na.rm = TRUE)
+  )
+```
+
+## Relocation Rents 
+```{r}
+#EDA to understand structure of second sheet(new_rents)
+new_rents <- rent[["new"]]
+head(new_rents)
+
+new_rents
+```
+
+```{r}
+cat("Missing values present:", any(is.na(new_rents)), "\n")
+```
+
+```{r}
+# % missing values per column
+missing_sorted <- sort(colMeans(is.na(new_rents)) * 100, decreasing = TRUE)
+head(missing_sorted)
+```
+
+```{r}
+#Clean names 
+new_rents <- clean_names(new_rents)
+
+# Check new names
+colnames(new_rents)
+```
+
+```{r}
+#Selecting variables that are important for the analysis
+new_rents <- new_rents |>
+  select(response_id, rent_amount, new_zip_code, proposed_new_unit_size, 
+         household_size, utilities_included) |>
+  mutate(
+    new_zip_code = str_extract(new_zip_code, "\\d{5}$"),
+    rent_amount = as.numeric(rent_amount),
+    new_zip_code = as.factor(new_zip_code),
+    proposed_new_unit_size = as.factor(proposed_new_unit_size)
+  ) |>
+  arrange(desc(rent_amount)) |>
+  drop_na()
+
+head(new_rents)
+```
+
+```{r}
+#Selecting variables of interest and dropping missing values
+new_rents <- new_rents |> 
+  select(response_id, rent_amount, new_zip_code,proposed_new_unit_size, 
+         household_size, utilities_included) |>
+  mutate(new_zip_code = str_extract(new_rents$new_zip_code,"\\d{5}$")) |>
+  mutate(rent_amount = as.numeric(rent_amount)) |>
+  arrange(desc(rent_amount)) |>
+  drop_na()
+head(new_rents)
+```
+
+**New Unit Rents Summary Statistics**
+
+```{r}
+# Descriptive Statistics 
+rent_stats2 <-new_rents |>
+  summarize(
+    mean = mean(rent_amount, na.rm = TRUE),
+    median = median(rent_amount, na.rm = TRUE),
+    min = min(rent_amount, na.rm = TRUE),
+    max = max(rent_amount, na.rm = TRUE),
+    sd = sd(rent_amount, na.rm = TRUE)
+  )
+rent_stats2
+```
+
+### Side by side visualization of original rents and relocation rents 
+
+```{r, warning=FALSE}
+#| fig-width: 10
+#| fig-height: 4
+#| dpi: 200
+
+
+# Plot 1: Old Rents Visualization
+# Visualization of the original unit rents to understand the structure of the data.
+p1 <- old_rents |> 
+  filter(!is.na(original_unit_rent)) |> 
+  ggplot(aes(x = original_unit_rent)) +
+  geom_histogram(fill = "skyblue", color = "black", bins = 30) +
+  geom_vline(aes(xintercept = rent_stats$median), color = "red", linetype = "dashed", size = 1) +
+  annotate("text", x = rent_stats$median * 1.03, y = Inf, vjust = 1.5, label = paste("Median:", dollar(rent_stats$median)), color = "red", size = 4) +
+  labs(title = "Distribution of Original Unit Rents", x = "", y = "") +
+  scale_x_continuous(labels = dollar) +
+  theme_minimal()
+
+# Plot 2: New rent distribution after relocation
+p2 <- new_rents |> 
+  filter(!is.na(rent_amount)) |> 
+  ggplot(aes(x = rent_amount)) +
+  geom_histogram(fill = "pink", color = "black", bins = 30) +
+  geom_vline(aes(xintercept = rent_stats2$median), color = "black", linetype = "dashed", size = 1) +
+  annotate("text", x = rent_stats2$median * 1.03, y = Inf, vjust = 1.5, label = paste("Median:", dollar(rent_stats2$median)), color = "red", size = 4) +
+  labs(title = "Distribution of Unit Rents After Relocation", x = "", y = "") +
+  scale_x_continuous(labels = dollar) +
+  theme_minimal()
+
+# Compare two plots 
+p1 | p2
+
+```
+
+
+
+**Number of program clients in each Zip code before and after relocation.**
+
+```{r, include=FALSE}
+# Zipcodes by number of program clients to check the distribution of clients in DC zipcodes and the median rent in each zip code. 
+zipcode_counts <- old_rents|>
+  group_by(original_zip_code) |>
+  summarise(count = n(), .groups = "drop") |>
+  arrange(desc(count))
+
+# Top 5 zipcodes
+top_zipcodes <- zipcode_counts |> 
+  filter(row_number() <= 5) |> 
+  pull(original_zip_code) |> sort()
+head(top_zipcodes)
+```
+
+```{r, include=FALSE}
+# New zipcodes by number of program clients
+new_zip <- new_rents|>
+  filter(!is.na(new_zip_code)) |>
+  group_by(new_zip_code) |>
+  summarise(count = n(), .groups = "drop") |>
+  arrange(desc(count))
+
+# Top 5 new zipcodes
+top_new_zip <- new_zip |> 
+  filter(row_number() <= 5) |> 
+  pull(new_zip_code) |> 
+  sort()
+  
+head(top_new_zip)
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4
+#| dpi: 200
+
+
+# First bar chart: Number of clients by Zip Code
+p1 <- ggplot(zipcode_counts, aes(x = reorder(original_zip_code, count), y = count)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = count), hjust = 1) +
+  scale_y_continuous(position = "right") +
+  coord_flip() +
+  labs(
+    title = "Number of clients by Zip Code",
+    x = "",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank())
+
+# Second bar chart: Number of relocated clients by Zip Code
+p2 <- ggplot(new_zip, aes(x = reorder(new_zip_code, count), y = count)) +
+  geom_bar(stat = "identity", fill = "salmon") +
+  geom_text(aes(label = count), hjust = 1) +
+  scale_y_continuous(position = "right") +
+  coord_flip() +
+  labs(
+    title = "Number of relocated clients by Zip Code",
+    x = "",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank())
+
+# Compare number of clients by zipcodes. 
+p1 | p2
+```
+
+### Average and Median Original Rent by Zip code
+
+```{r}
+# Average rent by zipcode
+rent_by_zip <- old_rents |>
+  group_by(original_zip_code) |>
+  summarize(average_rent = mean(original_unit_rent, na.rm = TRUE),
+            median_rent = median(original_unit_rent, na.rm = TRUE)) |>
+  arrange(average_rent)
+rent_by_zip
+```
+
+```{r}
+# Bar chart of average rent by zipcode
+ggplot(rent_by_zip, aes(x = reorder(original_zip_code, average_rent), y = average_rent)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  geom_point(aes(y = median_rent)) +
+  geom_text(aes(label = round(average_rent, 0)), hjust = 0.1) + 
+  coord_flip() +
+  labs(title = "Average unit rent by zipcode",
+       x = "Zipcode",
+       y = "Average Rent ($)") +
+  theme_minimal()
+```
+
+
+
+
+
+
+## Old Rents Visualization
+
+### Distribution of Original Unit Rent
+
+```{r}
+# Distribution Plot of original unit rents
+old_rents |> 
+  filter(!is.na(original_unit_rent)) |> 
+  ggplot(aes(x = original_unit_rent)) +
+  geom_histogram(fill = "skyblue", color = "black", bins = 30) +
+  labs(title = "Distribution of Original Unit Rents", x = "Rent($)", 
+       y = "Count") +
+  theme_minimal()
+```
+
+Original unit rents are concentrated around 1200- 1500, with most units being below 2000 and a few outliers above 3000
+
+### Zipcodes by number of program clients
+
+```{r}
+# Zipcodes by number of program clients
+zipcode_counts <- old_rents|>
+  group_by(original_zip_code) |>
+  summarise(count = n(), .groups = "drop") |>
+  arrange(desc(count))
+
+# Top 5 zipcodes
+top_zipcodes <- zipcode_counts |> 
+  filter(row_number() <= 5) |> 
+  pull(original_zip_code) |> sort()
+head(top_zipcodes)
+```
+
+```{r}
+#Visualize, bar chart 
+ggplot(zipcode_counts, aes(x = reorder(original_zip_code, count), y = count)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = count), hjust = -0.1) + # Count labels outside bars
+  scale_y_continuous(position = "right") +
+  coord_flip() +  # Flip bars horizontal
+  labs(
+    title = "Number of clients by Zip Code",
+    subtitle = paste("Most clients are coming from 5 zip codes: ", 
+                     paste(top_zipcodes, collapse = ", ")),
+       x = "",
+       y = ""
+    ) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+### Average and Median rent by zip code
+
+```{r}
+# Average rent by zipcode
+rent_by_zip <- old_rents |>
+  group_by(original_zip_code) |>
+  summarize(average_rent = mean(original_unit_rent, na.rm = TRUE),
+            median_rent = median(original_unit_rent, na.rm = TRUE)) |>
+  arrange(average_rent)
+rent_by_zip
+```
+
+```{r}
+# Bar chart of average rent by zipcode
+ggplot(rent_by_zip, aes(x = reorder(original_zip_code, average_rent), y = average_rent)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  geom_point(aes(y = median_rent)) +
+  geom_text(aes(label = round(average_rent, 0)), hjust = 0.1) + 
+  coord_flip() +
+  labs(title = "Average and Median unit rent by zipcode",
+       x = "",
+       y = "") +
+  theme_minimal()
+```
+
+### Average and Median Relocation Rents by Zip code
+```{r}
+# Average and median rent by zipcode
+new_rent_by_zip <- new_rents |>
+  filter(!is.na(new_zip_code), !is.na(rent_amount)) |>
+  group_by(new_zip_code) |>
+  summarize(
+    avg_new_rent = mean(rent_amount),
+    median_new_rent = median(rent_amount),
+    .groups = "drop"
+  )
+new_rent_by_zip
+```
+
+```{r}
+# Visualization of average and median new rent by zipcode
+ggplot(new_rent_by_zip, aes(x = reorder(new_zip_code, avg_new_rent), y = avg_new_rent)) +
+  geom_bar(stat = "identity", fill = "indianred") +
+  geom_point(aes(y = median_new_rent)) +
+  geom_text(aes(label = round(avg_new_rent, 0)), hjust = 1) + 
+  coord_flip() +
+  labs(title = "Average and Median New Unit rent by zipcode",
+       x = "",
+       y = "") +
+  theme_minimal() 
+```
+
+**Geographic heatmap showing median rent across zip codes**
+
+```{r}
+#Zipcodes 
+zip_shapes <- zctas(cb = FALSE)
+names(zip_shapes)
+```
+
+```{r}
+#| dpi: 100
+
+# OLD RENT MAP
+
+# Calculate median rent by zipcode
+geo_rent_summary <- old_rents |>
+  group_by(original_zip_code) |>
+  summarise(average_rent = median(original_unit_rent, na.rm = TRUE)) |>
+  mutate(zipcode = as.character(original_zip_code))
+
+# Zipcodes for joining
+map_data_old <- zip_shapes |>
+  mutate(ZCTA5CE20 = as.character(ZCTA5CE20)) |>
+  left_join(geo_rent_summary, by = c("ZCTA5CE20" = "zipcode")) |> 
+  filter(ZCTA5CE20 %in% geo_rent_summary$zipcode)
+
+# Plot with Zip labels
+p1 <- ggplot(map_data_old) +
+  geom_sf(aes(fill = average_rent)) +
+  geom_sf_text(aes(label = ZCTA5CE20),
+               color = "white",
+               size = 2.5) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(
+    fill = "Rent",
+    title = "Original Median Rent"
+  ) +
+  theme_void()
+
+
+
+# NEW RENT MAP
+
+# Calculate median rent by zipcode
+geo_new_rent <- new_rents |>
+  group_by(new_zip_code) |>
+  summarise(avg_new_rent = median(rent_amount, na.rm = TRUE)) |>
+  mutate(zipcode = as.character(new_zip_code))
+
+map_data_new <- zip_shapes |>
+  mutate(ZCTA5CE20 = as.character(ZCTA5CE20)) |>
+  left_join(geo_new_rent, by = c("ZCTA5CE20" = "zipcode")) |> 
+  filter(ZCTA5CE20 %in% geo_new_rent$zipcode)
+
+# Plot with Zip labels
+p2 <- ggplot(map_data_new) +
+  geom_sf(aes(fill = avg_new_rent), color = "lightblue") +
+  geom_sf_text(aes(label = ZCTA5CE20),
+               color = "white",
+               size = 2.5) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(
+    fill = "Rent",
+    title = "Median Relocation Rent"
+  ) +
+  theme_void()
+
+#Side by Side  
+
+p1 + p2
+```
+Most program clients were located in the 20019, 20020, 20032, and 20002 zip codes, specifically in the Northeast and Southeast areas, where rental costs are significantly lower.
+
+**Median rent by unit size overall**
+
+```{r}
+# Average rent + number of participants by unit size
+median_rent_unit <- new_rents |>
+  filter(!is.na(proposed_new_unit_size)) |>
+  group_by(proposed_new_unit_size) |>
+  summarise(
+    n_clients  = n(),                                 # count of participants     
+    median_new_rent = median(rent_amount, na.rm = TRUE)    # median rent
+  )
+
+median_rent_unit
+
+# If your summary is median_rent_unit
+median_rent_unit_long <- median_rent_unit |>
+  select(proposed_new_unit_size, median_new_rent,  n_clients) |>
+  pivot_longer(
+    cols = c(median_new_rent),
+    names_to = "rent_type",
+    values_to = "rent"
+  )
+```
+
+```{r}
+# Median rent as bar, n_clients as label
+ggplot(median_rent_unit,
+       aes(x = proposed_new_unit_size,
+           y = median_new_rent, fill = proposed_new_unit_size)) +
+  geom_col(aes(y = median_new_rent), position = position_dodge(width = 0.9)) +
+  geom_text(aes(label = paste0("n = ", n_clients)),
+            vjust = -0.3, size = 3) +
+  scale_y_continuous(labels = dollar) + 
+  labs(
+    title = "Median Monthly Rent By Unit Size After Relocation",
+    subtitle = "Labels show the number of participants in each unit type",
+    x = "",
+    y = "",
+    fill = "Unit Size"
+  ) +
+  theme_minimal()
+```
+Most program clients are concentrated in 2 bedroom (240 clients) and 3 bedroom (162 clients) units. Though larger units attract more rent, there are few program participants in the 4 or 5 bedroom units. Each bedroom is associated with roughly $713 higher rent. 
+
+**Key factors driving rent prices** - **Regression Analysis**
+
+```{r}
+# Run linear regression model to quantify how variables such as unit size and location influence rent costs,
+relocation_model <- lm(rent_amount ~ proposed_new_unit_size + new_zip_code + household_size + 
+                       utilities_included, data = new_rents)
+
+# regression results
+summary(relocation_model)
+```
+
+About 62% of the variation in rent amounts is explained by unit size and Zipcode.
+
+
+
+## Comparing Old Rents and Relocation Rents
+
+```{r}
+# Join old and new rents
+compare_old_new <- old_rents |> 
+  select(response_id, old_rent = original_unit_rent, 
+         old_zip = original_zip_code) |> 
+  inner_join(
+    new_rents |> 
+      select(response_id, new_rent = rent_amount, new_zip = new_zip_code,
+             household_size, utilities_included),
+    by = "response_id"
+  ) |> 
+  drop_na(old_rent, new_rent) 
+head(compare_old_new)
+
+# Check if any NAs remain
+any(is.na(compare_old_new))
+```
+
+
+```{r}
+#Adding a logical if rent increaased after relocation 
+compare_old_new <- compare_old_new |>
+  mutate(
+    rent_change = new_rent - old_rent,
+    rent_increase = rent_change > 0
+  )
+head(compare_old_new)
+```
+
+```{r}
+# Summary statistics 
+stats <- compare_old_new |> 
+  summarise(
+    mean_rent = mean(rent_change),
+    median_rent = median(rent_change),
+    min_rent = min(rent_change),
+    max_rent = max(rent_change)
+  )
+stats
+```
+
+The largest decrease in rent was 2,215 meaning some clients actually pay less after relocating. Half of the clients had their rent increase by 825 and on average clients saw a rent increase of about 979 suggesting some rent increases are pulling the average rent up. Largest increase was 3865. In general, most clients see an increase in rent as they move.
+
+```{r}
+# Count of increases vs decreases
+table(compare_old_new$rent_increase)
+prop.table(table(compare_old_new$rent_increase))  # proportion of increases
+```
+
+```{r}
+# Histogram of rent changes
+ggplot(compare_old_new, aes(x = rent_change)) +
+  geom_histogram(binwidth = 100, fill = "skyblue", color = "black") +
+  labs(title = "Rent changes after relocation",
+       x = "Rent Change ($)",
+       y = " Count")
+```
+
+```{r}
+#Propotion of rent increase per zipcode. 
+compare_old_new |> 
+  group_by(new_zip) |> 
+  summarise(
+    avg_increase = mean(rent_change),
+    prop_increase = mean(rent_increase),
+    .groups = "drop"
+  ) |> 
+  arrange(avg_increase)
+```
+
+80% of clients who moved to zipcode 20020 experienced an average of 433.8 increase in rent. All clients who moved to zipcode 6 had an average of 2578 increase in rent.
+
+## Move type - same zipcode or not
+
+```{r}
+#Check if clients moved to different zipcode or not
+compare_old_new  <- compare_old_new |>
+  mutate(
+    same_zip = old_zip == new_zip,          # TRUE if zip did not change
+    move_type = ifelse(same_zip, "Stayed", "Moved") 
+  )
+head(compare_old_new)
+
+#table showing count 
+table(compare_old_new$move_type)
+```
+
+```{r}
+ggplot(compare_old_new, aes(x = move_type, fill = move_type)) +
+  geom_bar() +
+  labs(title = "Clients moving vs staying by zipcode",
+       x = "Move Type",
+       y = "Count",
+       fill = "Move Type") +
+  theme_minimal()
+```
+
+
+
+## Current Rents
+
+**Current Rental Trends**
+
+```{r}
+current_rents <- rent[["curr"]]
+head(current_rents)
+
+cat("Missing values present:", any(is.na(current_rents)), "\n")
+```
+
+```{r}
+#change names to snake case 
+current_rents <- clean_names(current_rents)
+
+# Check new names
+colnames(current_rents)
+```
+
+```{r}
+# Selecting variables of interest
+current_rents <- current_rents |>
+  select(response_id, full_rent, tcp_total_incl_adj_credit,
+         client_rent_amount, housing_unit_city_state_zip) |>
+  mutate(
+    # extract zipcode 
+    current_zip = str_extract(housing_unit_city_state_zip, "\\d{5}$"),
+    # convert  to factor
+    current_zip = as.factor(current_zip),
+    # rename tcp_total column
+    rent_assistance = tcp_total_incl_adj_credit,
+    # convert response_id from dbl to factor
+    response_id = as.factor(response_id)
+  ) |>
+  select(response_id, full_rent, rent_assistance,
+         client_rent_amount, current_zip) |>
+  drop_na()
+head(current_rents)
+```
+
+**Current Unit Rents Summary Statistics**
+
+```{r}
+# Descriptive Statistics for full rent before subsidies 
+current_rents |>
+  summarize(
+    mean = mean(full_rent, na.rm = TRUE),
+    median = median(full_rent, na.rm = TRUE),
+    min = min(full_rent, na.rm = TRUE),
+    max = max(full_rent, na.rm = TRUE),
+    sd = sd(full_rent, na.rm = TRUE)
+  )
+
+
+# Descriptive Statistics for client_rent_amount - portion of rent paid by client 
+current_rents |>
+  summarize(
+    mean = mean(client_rent_amount, na.rm = TRUE),
+    median = median(client_rent_amount, na.rm = TRUE),
+    min = min(client_rent_amount, na.rm = TRUE),
+    max = max(client_rent_amount, na.rm = TRUE),
+    sd = sd(client_rent_amount, na.rm = TRUE)
+  )
+
+
+# Descriptive Statistics for rent_assistance- portion of rent paid by program
+current_rents |>
+  summarize(
+    mean = mean(rent_assistance, na.rm = TRUE),
+    median = median(rent_assistance, na.rm = TRUE),
+    min = min(rent_assistance, na.rm = TRUE),
+    max = max(rent_assistance, na.rm = TRUE),
+    sd = sd(rent_assistance, na.rm = TRUE)
+  )
+```
+
+**Distribution of current unit rents**
+
+```{r}
+# Distribution - full rent 
+med_full <- median(current_rents$full_rent, na.rm = TRUE)
+
+ggplot(current_rents, aes(x = full_rent)) +
+  geom_histogram(fill = "seagreen", color = "black", bins = 30) +
+  geom_vline(aes(xintercept = med_full), color = "red", 
+             linetype = "dashed", size = 1) +
+  annotate(
+    "text",
+    x = med_full * 1.03,          # slight shift right
+    y = Inf,
+    vjust = 1.5,
+    label = paste("Median:", dollar(med_full)),
+    color = "red",
+    size = 4
+  ) +
+  labs(title = "Distribution of Current Full Rents", 
+       subtitle = "Total rent charged for each unit before applying any subsidies.",
+       x = "", 
+       y = "") +
+  scale_x_continuous(labels = dollar) +
+  theme_minimal()
+```
+
+
+**Breakdown of full rent, rent assistance, and client share**
+
+```{r}
+# Summarize median and max for each rent type
+current_rent_summary <- current_rents |> 
+  summarize(
+    full_rent_med = median(full_rent, na.rm = TRUE),
+    full_rent_max = max(full_rent, na.rm = TRUE),
+    client_rent_amount_med = median(client_rent_amount, na.rm = TRUE),
+    client_rent_amount_max = max(client_rent_amount, na.rm = TRUE),
+    rent_assistance_med = median(rent_assistance, na.rm = TRUE),
+    rent_assistance_max = max(rent_assistance, na.rm = TRUE)
+  ) |> 
+  
+  # Convert to long format for ggplot
+  pivot_longer(
+    cols = everything(),
+    names_to = c("rent_type", "stat"),
+    names_pattern = "(.*)_(med|max)$",
+    values_to = "amount"
+  ) |> 
+  mutate(
+    # Rename statistic labels
+    stat = case_when(
+      stat == "med" ~ "Median",
+      stat == "max" ~ "Max"
+    ),
+    # Rename rent types
+    rent_type = case_when(
+      rent_type == "full_rent" ~ "Full Rent",
+      rent_type == "client_rent_amount" ~ "Client Rent",
+      rent_type == "rent_assistance" ~ "Rent Assistance"
+    )
+  )
+
+# Plot 
+ggplot(current_rent_summary, aes(x = stat, y = amount, fill = rent_type)) +
+  geom_col(position = position_dodge(width = 0.8), color = "black") +  # Bars side by side
+  geom_text(
+    aes(label = scales::label_number(accuracy = 1, prefix = "$")(amount)), #int numbers
+    position = position_dodge(width = 0.8),
+    vjust = -0.5,
+    size = 3
+  ) +  
+  scale_fill_manual(values = c("Full Rent" = "seagreen",
+                               "Client Rent" = "orange",
+                               "Rent Assistance" = "skyblue")) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 1, prefix = "$")) +
+  labs(
+    title = "Comparison of Current Rent Amounts",
+    subtitle = "Median and Max for Full Rent, Client Rent and Rent Assistance",
+    x = "",
+    y = "",
+    fill = "Rent Type"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+#Number of clients by current Zip Code 
+# Current zipcodes by number of program clients
+current_zipcodes <- current_rents|>
+  filter(!is.na(current_zip)) |>
+  group_by(current_zip) |>
+  summarise(count = n(), .groups = "drop") |>
+  arrange(desc(count))
+
+# Top 5 new zipcodes
+top_curr_zip <- current_zipcodes |> 
+  filter(row_number() <= 5) |> 
+  pull(current_zip) |> 
+  sort()
+
+# Plot
+ggplot(current_zipcodes, aes(x = reorder(current_zip, count), y = count)) +
+  geom_bar(stat = "identity", fill = "purple") +
+  geom_text(aes(label = count), hjust = -0.1) + # Count labels outside bars
+  scale_y_continuous(position = "right") +
+  coord_flip() +  # horizontal bars
+  labs(
+    title = "Number of clients by current zip code",
+    subtitle = paste("Top 5 zip codes:", paste(top_curr_zip, collapse = ", ")),
+    x = "",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+
+**Rent distribution at different stages**
+
+```{r}
+# Descriptive Statistics and a Box plot to compare distribution of rents old, relocation and current rent stages
+# Convert response_id to character
+old_rents <- old_rents |> mutate(response_id = as.character(response_id))
+new_rents <- new_rents |> mutate(response_id = as.character(response_id))
+current_rents <- current_rents |> mutate(response_id = as.character(response_id))
+
+# Combine all rent stages for comparison and add rent_type
+all_rents <- bind_rows(
+  old_rents |> select(response_id, rent = original_unit_rent) |> mutate(rent_type = "old"),
+  new_rents |> select(response_id, rent = rent_amount) |> mutate(rent_type = "new"),
+  current_rents |> select(response_id, rent = full_rent) |> mutate(rent_type = "curr")
+) |> mutate(rent_type = factor(rent_type, levels = c("old", "new", "curr")))
+
+
+# Visualization: Boxplot of Rents by Stage
+ggplot(all_rents, aes(x = rent_type, y = rent, fill = rent_type)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(alpha = 0.1, width = 0.2) +
+  scale_y_continuous(labels = dollar) +
+  labs(
+    title = "Distribution of Rents by Stage",
+    x = "",
+    y = "",
+    fill = "Rent Stage"
+  ) +
+  theme_minimal()
+```
+
+**Current Average Rent vs Market Average Rent**
+
+```{r}
+zillow_rent <- tibble::tribble(
+  ~zip_code, ~average_rent,
+  "20001", "$2,695",
+  "20002", "$2,527",
+  "20003", "$2,744",
+  "20005", "$2,750",
+  "20007", "$3,400",
+  "20008", "$2,300",
+  "20009", "$2,700",
+  "20010", "$2,369",
+  "20011", "$2,443",
+  "20012", "$2,290",
+  "20016", "$2,622",
+  "20017", "$1,750",
+  "20018", "$2,250",
+  "20019", "$2,100",
+  "20020", "$2,233",
+  "20024", "$2,378",
+  "20032", "$1,550",
+  "20037", "$2,600"
+) |>
+  mutate(
+    zip_code = as.character(zip_code),
+    zillow_rent = as.numeric(str_remove_all(average_rent, "[$,\\.]"))
+  ) |>
+  select(zip_code, zillow_rent)
+```
+
+```{r}
+# Average and media rent by zipcode
+current_zip_rent <- current_rents |>
+  group_by(current_zip) |>
+  summarize(average_rent = mean(full_rent, na.rm = TRUE),
+            median_rent = median(full_rent, na.rm = TRUE)) |>
+  arrange(average_rent)
+current_zip_rent
+```
+
+```{r}
+#Current average full rents vs Zillow average rent 
+# Current rents
+current_zip_rent_summ <- current_zip_rent |>
+  group_by(current_zip) |>
+  summarise(
+    average_rent = mean(average_rent, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(zip_code = as.character(current_zip)) |>
+  select(zip_code, average_rent)
+
+# Join current and zillow
+current_zillow_top10 <- current_zip_rent_summ |>
+  inner_join(zillow_rent, by = "zip_code") |>
+  slice_max(order_by = average_rent, n = 10)
+
+# Long format for plotting
+rents_long <- current_zillow_top10 |>
+  pivot_longer(
+    cols = c(average_rent, zillow_rent),
+    names_to = "rent_type",
+    values_to = "rent"
+  ) |>
+  mutate(
+    rent_type = case_when(
+      rent_type == "average_rent" ~ "Current average rent",
+      rent_type == "zillow_rent"  ~ "Zillow average rent"
+    )
+  )
+
+```
+
+```{r}
+# Plot
+ggplot(rents_long, aes(x = zip_code, y = rent, fill = rent_type)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.7) +
+  scale_fill_manual(
+    values = c(
+      "Current average rent" = "steelblue",
+      "Zillow average rent"  = "maroon"
+    )
+  ) +
+  scale_y_continuous(position = "right", labels = scales::dollar) +
+  coord_flip() +
+  labs(
+    title = "Current vs Zillow Average Rent by Zipcode",
+    subtitle = "Top 10 client zip codes by current average rent",
+    x = "",
+    y = "",
+    fill = ""
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(hjust = 1),
+    legend.position = "top"
+  )
+```
+
+
+
+## Current Rent Comparison with Fair Market Rent 
+
+```{r}
+#API tokens - USHUD 
+#Token expires and needs to be updated periodically. Here is the website to get new token:https://www.huduser.gov/hudapi/public/save-selection
+hud_token <- "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiI2IiwianRpIjoiMTZjMWNmM2IzYzA5NjdiMjk5ODVjOTc3ZDE0ZDIxNWM0ZmU2MzEwMGM2NjU1NTkwOTY3ZTFmZWE4MzM2NmNiMDE5YWQyNWYyOTA5ZjNlY2EiLCJpYXQiOjE3NjE0NTQ3MDUuNTk0ODM5LCJuYmYiOjE3NjE0NTQ3MDUuNTk0ODQzLCJleHAiOjIwNzY5ODc1MDUuNTg5MjU5LCJzdWIiOiIxMTAxMjMiLCJzY29wZXMiOltdfQ.XZ4VYcUnpx9mX9ofU59CYDrZtVVXRggkIrpM4JI4lhtZUlB6SwRcJ93IY2fU1HbxSR_jSU_9tTr67obW3mTbLQ"
+```
+
+```{r}
+# Send a GET request to HUD API with token
+test <- GET(
+  "https://www.huduser.gov/hudapi/public/fmr/listStates",
+  add_headers(Authorization = paste("Bearer", hud_token))
+)
+
+# Confirm request success 
+status_code(test)
+output <- content(test)
+```
+
+```{r}
+#URL and Authorization Header
+hud_url <- "https://www.huduser.gov/hudapi/public/fmr"
+hud_states <- paste0(hud_url, "/listStates")
+hud_dc <- paste0(hud_url, "/statedata/DC")
+hud_dc_metro <- paste0(hud_url, "/data/METRO47900M47900")
+auth_header <- paste("Bearer", hud_token)
+
+```
+
+```{r}
+# Get list of available states
+req_states <- GET(hud_states, add_headers(Authorization = auth_header))
+status_code(req_states)
+```
+
+```{r}
+#Washington DC Metro Housing rentals data 
+req_dc <- GET(url = hud_dc, add_headers(Authorization = auth_header))
+df_dc <- NULL
+dc_metro_code <- NULL
+
+if (status_code(req_dc) == 200) {
+  df_dc <- content(req_dc) 
+  df_dc <- df_dc$data$metroareas |> 
+    map_dfr(function(d) as.data.frame(d))
+  
+  dc_metro_code <- df_dc$code[1]
+}
+
+dc_metro_code
+df_dc
+```
+
+```{r}
+#DC API basic rent data 
+req_dc_metro <- GET(url = paste0(hud_dc_metro, "?updated=2020"), 
+                    add_headers(Authorization = auth_header))
+df_dc_metro <- NULL
+
+if (status_code(req_dc_metro) == 200) {
+  df_dc_metro <- content(req_dc_metro) 
+  df_dc_metro <- df_dc_metro$data$basicdata |> 
+    map_dfr(function(d) as.data.frame(d))
+  
+}
+
+#inspect rows
+head(df_dc_metro)
+```
+
+```{r}
+# Check for missing values
+colSums(is.na(df_dc_metro))
+```
+
+```{r}
+#Clean names 
+df_dc_metro<- clean_names(df_dc_metro)
+
+# Check new names
+colnames(df_dc_metro)
+```
+
+```{r}
+#Descriptive Stats 
+df_dc_metro |>
+  select(efficiency, one_bedroom, two_bedroom, three_bedroom, four_bedroom) |>
+  map(summary)
+```
+
+```{r}
+# Create avg.rent after removing "MSA level"
+df_dc_metro <- df_dc_metro |> 
+  filter(zip_code != "MSA level") |> 
+  rowwise() |> 
+  mutate(avg.rent = median(c(efficiency, one_bedroom, two_bedroom, 
+                             three_bedroom, four_bedroom), na.rm = TRUE)) |> 
+  ungroup()
+
+# Get top 10 most expensive zip codes
+top_rent_zips <- df_dc_metro |>
+  arrange(zip_code) |> 
+  slice_head(n = 10)
+  
+top_rent_zips
+```
+
+```{r}
+# Merging relocation rents and market rents
+# Reshape to long format: one row per zip and bedroom size
+hud_rents <- df_dc_metro |>
+  select(zip_code, efficiency, one_bedroom, two_bedroom, 
+         three_bedroom, four_bedroom) |>
+  pivot_longer(
+    cols = c(efficiency, one_bedroom, two_bedroom, three_bedroom, four_bedroom),
+    names_to = "bedroom_type",
+    values_to = "market_rent"
+  ) |>
+  mutate(
+    bedrooms = case_when(
+      bedroom_type == "efficiency" ~ 0,
+      bedroom_type == "one_bedroom" ~ 1,
+      bedroom_type == "two_bedroom" ~ 2,
+      bedroom_type == "three_bedroom" ~ 3,
+      bedroom_type == "four_bedroom" ~ 4,
+      TRUE ~ NA_integer_
+    )
+  ) |>
+select(-bedroom_type) |>
+  arrange(desc(market_rent))
+
+head(hud_rents)
+```
+
+
+**Fair Market Rents Summary Statistics**
+
+```{r}
+# HUD summary statistics
+hud_rents |>
+  summarize(
+    mean = mean(market_rent, na.rm = TRUE),
+    median = median(market_rent, na.rm = TRUE),
+    min = min(market_rent, na.rm = TRUE),
+    max = max(market_rent, na.rm = TRUE),
+    sd = sd(market_rent, na.rm = TRUE)
+  )
+
+```
+
+```{r}
+# Get zipcodes present in both datasets
+common_zips <- intersect(unique(new_rents$new_zip_code), 
+                         unique(hud_rents$zip_code))
+
+# Filter both datasets to only these common zipcodes
+new_rents <- new_rents |> 
+  filter(new_zip_code %in% common_zips)
+
+hud_rents <- hud_rents |> 
+  filter(zip_code %in% common_zips)
+
+new_rents 
+hud_rents
+```
+
+**HUD fair market rents by unit size**
+
+```{r, echo=TRUE}
+# Market median rent by unit size 
+market_median<- hud_rents |>
+  group_by(bedrooms) |>
+  filter(!is.na(bedrooms)) |>
+  summarise(median_mkt_rent = median(market_rent, na.rm = TRUE))
+
+ggplot(market_median, aes(x = bedrooms, fill = bedrooms)) +
+  geom_col(aes(y = median_mkt_rent), position = position_dodge(width = 0.9)) +
+  geom_text(aes(y = median_mkt_rent, label = dollar(round(median_mkt_rent, 0))),
+            vjust = -0.5, size = 3.5) +  # Labels on top of bars
+  scale_y_continuous(labels = dollar) + 
+  labs(title = "FMR Rents by Unit Size",
+       subtitle = "Roughly 40% of renters pay this amount or less", 
+       x = "",
+       y = "",
+       fill = "Unit Size") +
+  theme_minimal()
+```
+
+```{r}
+# Combine all rent stages for comparison and add rent_type
+combined_rents <- old_rents |>
+  select(original_unit_rent, original_zip_code) |> 
+  # Full join with new rents on zip code, allow many-to-many relationship 
+  full_join(
+    new_rents |>  
+      select(rent_amount, new_zip_code, proposed_new_unit_size), 
+    by = c("original_zip_code" = "new_zip_code"), 
+    relationship = "many-to-many"
+  ) |> 
+  # Full join with current rents on zip code, allow many-to-many relationship
+  full_join(
+    current_rents |>  
+      select(full_rent, client_rent_amount, rent_assistance, current_zip), 
+    by = c("original_zip_code" = "current_zip"),
+    relationship = "many-to-many"
+  ) |> 
+  mutate(
+    rent_old = original_unit_rent,                   # Rename old rent variable 
+    rent_new = rent_amount,                          # Rename new rent variable
+    bedrooms = as.integer(str_extract(proposed_new_unit_size, "\\d+")),  
+    zip_code = original_zip_code                     # Use original zip code consistently 
+  ) |> 
+  group_by(zip_code, bedrooms) |>            # Group data by zip code and number of bedrooms
+  summarise(
+    median_rent_old = round(median(rent_old, na.rm = TRUE)),              
+    median_rent_new = round(median(rent_new, na.rm = TRUE)),            
+    median_full_rent = round(median(full_rent, na.rm = TRUE)),            
+    median_client_rent = round(median(client_rent_amount, na.rm = TRUE)), 
+    median_rent_assistance = round(median(rent_assistance, na.rm = TRUE)),
+    .groups = "drop"                                                     # Ungroup after summarise
+  )
+
+head(combined_rents)
+
+```
+
+```{r}
+# Join with all datasets by response_id with many-to-many relationship
+combined_rents <- old_rents |>
+  select(response_id, original_unit_rent, original_zip_code) |> 
+  full_join(
+    new_rents |>  
+      select(response_id, rent_amount, new_zip_code, proposed_new_unit_size), 
+    by = "response_id", 
+    relationship = "many-to-many"
+  ) |> 
+  full_join(
+    current_rents |>  
+      select(response_id, full_rent, client_rent_amount, rent_assistance, current_zip), 
+    by = "response_id",
+    relationship = "many-to-many"
+  ) |> 
+  mutate(
+    rent_old = original_unit_rent,
+    rent_new = rent_amount,
+    zip_code = coalesce(new_zip_code, current_zip, original_zip_code),
+    bedrooms = as.integer(str_extract(proposed_new_unit_size, "\\d+"))
+  )
+
+```
+
+```{r}
+# Join with HUD rents by zip_code and bedrooms 
+rent_map <- combined_rents |> 
+  left_join(hud_rents, by = c("zip_code", "bedrooms"), relationship = "many-to-many")
+
+# Impute missing rent and assistance values 
+rent_map <- rent_map |> 
+  group_by(zip_code, bedrooms) |> 
+  mutate(
+    rent_old = ifelse(is.na(rent_old), median(rent_old, na.rm = TRUE), rent_old),                 # Impute missing rent_old
+    rent_new = ifelse(is.na(rent_new), median(rent_new, na.rm = TRUE), rent_new),                 # Impute missing rent_new
+    full_rent = ifelse(is.na(full_rent), median(full_rent, na.rm = TRUE), full_rent),             # Impute missing full_rent
+    client_rent_amount = ifelse(is.na(client_rent_amount), median(client_rent_amount, na.rm = TRUE), client_rent_amount),  # Impute missing client_rent_amount
+    rent_assistance = ifelse(is.na(rent_assistance), median(rent_assistance, na.rm = TRUE), rent_assistance),              # Impute missing rent_assistance
+    market_rent = ifelse(is.na(market_rent), median(market_rent, na.rm = TRUE), market_rent)      # Impute missing market_rent (HUD)
+  ) |> 
+  ungroup()
+
+# Drop rows missing bedrooms because its a key variable
+rent_map <- rent_map |> filter(!is.na(bedrooms)) 
+# Group by zip_code and bedrooms and summarize rents by median, rounded to whole dollars
+rent_summary <- rent_map |> 
+  group_by(zip_code, bedrooms) |>
+  summarise(
+    median_rent_old = round(median(rent_old, na.rm = TRUE)),
+    median_rent_new = round(median(rent_new, na.rm = TRUE)),
+    median_full_rent = round(median(full_rent, na.rm = TRUE)),
+    median_client_rent = round(median(client_rent_amount, na.rm = TRUE)),
+    median_rent_assistance = round(median(rent_assistance, na.rm = TRUE)),
+    median_hud_rent = round(median(market_rent, na.rm = TRUE)),
+    .groups = "drop"
+  ) 
+
+rent_summary
+```
+
+```{r}
+# Summarize average rents by zipcode and bedroom count. Only current rent was used. 
+avg_rents <- rent_map |>
+  group_by(zip_code, bedrooms) |>
+  summarize(
+    avg_current_rent = median(full_rent, na.rm = TRUE),
+    avg_market_rent = median(market_rent, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Identify top 6 zip codes by average relocation rent overall
+top6_zips <- avg_rents |>
+  group_by(zip_code) |>
+  summarize(overall_avg = median(avg_current_rent, na.rm = TRUE)) |>
+  slice_max(order_by = overall_avg, n = 6) |> 
+  pull(zip_code)
+
+
+# Filter for top 6 zips
+top6_zips_plot <- avg_rents |> 
+  filter(zip_code %in% top6_zips) |> 
+  pivot_longer(cols = c(avg_current_rent, avg_market_rent), 
+               names_to = "rent_type", values_to = "avg_rent")
+
+# Plot grouped bar chart with flipped coordinates
+ggplot(top6_zips_plot, aes(x = factor(bedrooms), y = avg_rent, 
+                           fill = rent_type)) +
+  geom_col(position = position_dodge(width = 0.7)) +
+  facet_wrap(~ factor(zip_code), scales = "free_y") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c(avg_current_rent = "steelblue", avg_market_rent = "tomato"),
+    labels = c("Career MAP Rent", "Market Rent")
+  ) +
+  labs(
+    title = "Median Current and FMR Rents by Zip code and Beds",
+    x = "Bedroom",
+    y = "Amounts ($)",
+    fill = "Rent Type"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+
+## DC Housing Authority 2025 Maximum Housing Payment Standards 
+**Maximum unit rents in listed zip codes**
+
+```{r}
+# Max payment standard per unit size (0–5 bedrooms)
+unit_sizes <- sort(unique(rent_summary$bedrooms))  # get unit sizes present
+max_payment_std <- c(3762, 3845, 4327, 5410, 6382, 7340)  
+
+max_payment_df <- tibble(
+  bedrooms = unit_sizes,
+  rent_type = "Max Payment Standard",
+  rent = max_payment_std[1:length(unit_sizes)]
+)
+```
+
+```{r}
+rent_compare_df <- rent_summary |> 
+  group_by(bedrooms) |> 
+  summarise(
+    "Current Median Rent" = median(median_full_rent, na.rm = TRUE),
+    "HUD Median Rents" = median(median_hud_rent, na.rm = TRUE),
+    .groups = "drop"
+  ) |> 
+  pivot_longer(
+    cols = c("Current Median Rent", "HUD Median Rents"),
+    names_to = "rent_type",
+    values_to = "rent"
+  )
+```
+
+
+```{r, include=FALSE}
+all_rents_long <- bind_rows(rent_compare_df, max_payment_df)
+
+```
+
+```{r, warning=FALSE}
+#Plot 
+ggplot(all_rents_long, aes(x = factor(bedrooms), y = rent, fill = rent_type)) +
+  geom_col(position = position_dodge(width = 0.4), width = 0.4) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(
+    title = "Median Rent Comparison by Unit Size",
+    subtitle = "Current Rents vs HUD Rents vs Max Payment Standard",
+    x = "Unit Sizes",
+    y = "",
+    fill = ""
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+```
+
+```{r, include=FALSE}
+#Inflation Adjusted Predictions 
+dc_inflation_rate <- 0.025   # 2.5% annual inflation
+years_ahead <- 1            # project 1 year forward
+
+# Adjusted predictions
+rent_forecast <- current_zillow_top10 |>
+  mutate(
+    predicted_current_rent = average_rent * (1 + dc_inflation_rate)^years_ahead,
+    predicted_zillow_rent = zillow_rent * (1 + dc_inflation_rate)^years_ahead
+  )
+
+# Keep only top 5 ZIP codes by current average rent
+top5_rent_forecast <- rent_forecast |>
+  slice_max(order_by = average_rent, n = 5)
+
+```
+
+```{r}
+# Keep only top 5 ZIP codes by current average rent
+top5_rent_forecast <- rent_forecast |>
+  slice_max(order_by = average_rent, n = 5)
+
+#Convert to long format 
+rents_long_forecast <-top5_rent_forecast|>
+  select(zip_code, average_rent, zillow_rent,
+         predicted_current_rent, predicted_zillow_rent) |>
+  pivot_longer(
+    cols = -zip_code,
+    names_to = "rent_type",
+    values_to = "rent"
+  ) |>
+  mutate(
+    rent_type = dplyr::recode(
+      rent_type,
+      average_rent = "Current Avg Rent",
+      zillow_rent = "Zillow Avg Rent",
+      predicted_current_rent = "Predicted Rent",
+      predicted_zillow_rent = "Predicted Zillow Rent"
+    )
+  )
+
+```
+
+Annual Inflation rate for DC area as of September 2025 was 2.5%. 
+```{r}
+#Plot rent vs inflation adjusted rents 
+ggplot(rents_long_forecast, aes(x = zip_code, y = rent, fill = rent_type)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+  scale_y_continuous(labels = scales::dollar) +
+  coord_flip() +
+  labs(
+    title = "Current and Predicted Rent by Zip Code",
+    subtitle = "Inflation-adjusted projection using 2.5 % DC annual inflation rate",
+    x = "",
+    y = "",
+    fill = ""
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+```
+
+```{r}
+#Projection table
+rent_forecast |>
+  select(zip_code,
+         average_rent,
+         predicted_current_rent,
+         zillow_rent,
+         predicted_zillow_rent) |>
+  mutate(across(where(is.numeric), round, 0))
+rent_forecast 
+```
+
+
+
+
+
